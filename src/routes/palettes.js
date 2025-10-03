@@ -3,12 +3,13 @@ const {
   searchPalettes,
   getUserPalettes,
   getPaletteById,
-  //   createCustomPalette,
+  createCustomPalette,
   savePalette,
   updateSavedPalette,
   unsavePalette,
   getPopularPalettes,
   getGlobalPaletteById,
+  getGlobalPaletteByExternalId,
 } = require("../controllers/paletteController");
 const {
   validatePalette,
@@ -55,6 +56,9 @@ const router = express.Router();
  *                 success:
  *                   type: boolean
  *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: Palettes retrieved successfully
  *                 data:
  *                   type: object
  *                   properties:
@@ -68,6 +72,10 @@ const router = express.Router();
  *                               isSaved:
  *                                 type: boolean
  *                                 description: Whether the current user has saved this palette
+ *                               savedPaletteId:
+ *                                 type: string
+ *                                 nullable: true
+ *                                 description: ID of saved palette if user has saved it
  *                     total:
  *                       type: number
  *                     query:
@@ -177,6 +185,49 @@ router.get("/popular", validatePagination, getPopularPalettes);
  *         description: Palette not found
  */
 router.get("/global/:id", validateMongoId, getGlobalPaletteById);
+
+/**
+ * @swagger
+ * /api/palettes/external/{externalId}:
+ *   get:
+ *     tags: [Palettes]
+ *     summary: Get a palette by external ID (auto-syncs if needed)
+ *     parameters:
+ *       - in: path
+ *         name: externalId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: External palette ID (e.g., from ColorMagic)
+ *         example: colormagic_123
+ *     responses:
+ *       200:
+ *         description: Palette retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     palette:
+ *                       allOf:
+ *                         - $ref: '#/components/schemas/GlobalPalette'
+ *                         - type: object
+ *                           properties:
+ *                             isSaved:
+ *                               type: boolean
+ *                             savedPaletteId:
+ *                               type: string
+ *                               nullable: true
+ *       404:
+ *         description: Palette not found
+ */
+router.get("/external/:externalId", getGlobalPaletteByExternalId);
 
 // Protected routes
 router.use(protect);
@@ -299,7 +350,7 @@ router.get("/saved", validatePagination, getUserPalettes);
  *                 data:
  *                   $ref: '#/components/schemas/SavedPaletteResponse'
  */
-// router.post('/create', validatePalette, createCustomPalette);
+router.post('/create', validatePalette, createCustomPalette);
 
 /**
  * @swagger
@@ -368,6 +419,24 @@ router.get("/saved", validatePagination, getUserPalettes);
  *                   $ref: '#/components/schemas/SavedPaletteResponse'
  *       400:
  *         description: Palette already saved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 message:
+ *                   type: string
+ *                   example: Palette already saved in your collection
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     savedPaletteId:
+ *                       type: string
+ *                     globalPalette:
+ *                       $ref: '#/components/schemas/GlobalPalette'
  */
 router.post("/save", validateSavePalette, savePalette);
 
@@ -385,7 +454,7 @@ router.post("/save", validateSavePalette, savePalette);
  *         required: true
  *         schema:
  *           type: string
- *         description: Saved palette ID
+ *         description: Saved palette ID (UserPalette ID)
  *     responses:
  *       200:
  *         description: Saved palette retrieved successfully
@@ -398,7 +467,30 @@ router.post("/save", validateSavePalette, savePalette);
  *                   type: boolean
  *                   example: true
  *                 data:
- *                   $ref: '#/components/schemas/SavedPaletteResponse'
+ *                   type: object
+ *                   properties:
+ *                     savedPaletteId:
+ *                       type: string
+ *                       description: ID of the UserPalette record
+ *                     globalPalette:
+ *                       $ref: '#/components/schemas/GlobalPalette'
+ *                     userSaveData:
+ *                       type: object
+ *                       properties:
+ *                         folderId:
+ *                           type: string
+ *                           nullable: true
+ *                         personalNotes:
+ *                           type: string
+ *                         personalTags:
+ *                           type: array
+ *                           items:
+ *                             type: string
+ *                         isLiked:
+ *                           type: boolean
+ *                         savedAt:
+ *                           type: string
+ *                           format: date-time
  *       404:
  *         description: Saved palette not found
  */
@@ -418,7 +510,7 @@ router.get("/saved/:id", validateMongoId, getPaletteById);
  *         required: true
  *         schema:
  *           type: string
- *         description: Saved palette ID
+ *         description: Saved palette ID (UserPalette ID)
  *     requestBody:
  *       content:
  *         application/json:
@@ -479,7 +571,7 @@ router.put(
  *         required: true
  *         schema:
  *           type: string
- *         description: Saved palette ID
+ *         description: Saved palette ID (UserPalette ID)
  *     responses:
  *       200:
  *         description: Palette removed from saved palettes
@@ -494,6 +586,8 @@ router.put(
  *                 message:
  *                   type: string
  *                   example: Palette removed from saved palettes
+ *       404:
+ *         description: Saved palette not found
  */
 router.delete("/saved/:id", validateMongoId, unsavePalette);
 

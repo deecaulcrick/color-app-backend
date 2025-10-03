@@ -5,7 +5,7 @@ const ColorMagicService = require("../services/colorMagicService");
 
 const searchPalettes = async (req, res) => {
   try {
-    const { q: query } = req.query;
+    const { q: query, limit = 20 } = req.query;
 
     if (!query) {
       return res.status(400).json({
@@ -13,40 +13,73 @@ const searchPalettes = async (req, res) => {
         message: "Query parameter 'q' is required",
       });
     }
-    const searchResults = await ColorMagicService.searchPalettes(query);
 
-    let savedPaletteIds = [];
-    if (req.user && req.user._id) {
-      const savedPalettes = await UserPalette.find({
-        userId: req.user._id,
-      }).populate({
-        path: "paletteId",
-        match: {
-          source: "colormagic",
-          externalId: { $in: searchResults.data.map((p) => p.id) },
-        },
-      });
+    const searchResults = await ColorMagicService.searchPalettes(query, limit);
 
-      savedPaletteIds = savedPalettes
-        .filter((sp) => sp.paletteId) // Filter out nulls
-        .map((sp) => sp.paletteId.externalId);
-    }
+    // For each search result, find or create global palette
+    const processedPalettes = await Promise.all(
+      searchResults.data.map(async (externalPalette) => {
+        try {
+          // Try to find existing global palette by external ID
+          let globalPalette = await Palette.findOne({
+            source: 'colormagic',
+            externalId: externalPalette.id
+          });
 
-    // Transform results to our palette format
-    const transformedPalettes = searchResults.data.map((palette) => ({
-      ...ColorMagicService.transformPalette(palette),
-      id: palette.id,
-      isSaved: savedPaletteIds.includes(palette.id),
+          // If doesn't exist, create it
+          if (!globalPalette) {
+            const transformedData = ColorMagicService.transformPalette(externalPalette);
+            globalPalette = await Palette.create({
+              ...transformedData,
+              externalId: externalPalette.id,
 
-      totalSaves: 0,
-      totalLikes: 0,
-    }));
+              source: 'colormagic',
+              isPublic: true
+            });
+          }
+
+          // Check if current user has saved this palette (if authenticated)
+          let isSaved = false;
+          let savedPaletteId = null;
+          if (req.user) {
+            const savedPalette = await UserPalette.findOne({
+              userId: req.user._id,
+              paletteId: globalPalette._id
+            });
+            if (savedPalette) {
+              isSaved = true;
+              savedPaletteId = savedPalette._id;
+            }
+          }
+
+          return {
+            ...globalPalette.toObject(),
+            externalId: externalPalette.id, // Keep external ID for saving
+            isSaved,
+            savedPaletteId
+          };
+        } catch (error) {
+          console.error('Error processing palette:', externalPalette.id, error);
+          // Return transformed palette even if DB save fails
+          return {
+            ...ColorMagicService.transformPalette(externalPalette),
+            id: externalPalette.id,
+            externalId: externalPalette.id,
+            isSaved: false,
+            savedPaletteId: null,
+            totalSaves: 0,
+            totalLikes: 0,
+            totalViews: 0
+          };
+        }
+      })
+    );
 
     res.status(200).json({
       success: true,
       message: "Palettes retrieved successfully",
       data: {
-        palettes: transformedPalettes,
+        palettes: processedPalettes,
         total: searchResults.total,
         query,
       },
@@ -93,7 +126,6 @@ const getUserPalettes = async (req, res) => {
         totalSaves: saved.paletteId.totalSaves,
         totalLikes: saved.paletteId.totalLikes,
         totalViews: saved.paletteId.totalViews,
-        createdBy: saved.paletteId.createdBy,
         createdAt: saved.paletteId.createdAt,
       },
       userSaveData: {
@@ -113,7 +145,7 @@ const getUserPalettes = async (req, res) => {
           current: parseInt(page),
           pages: Math.ceil(total / limit),
           total,
-          hasNext: skip + savedPalettes.length < total,
+          hasNext: skip + userPalettes.length < total, // Fixed: was using savedPalettes instead of userPalettes
           hasPrev: page > 1,
         },
       },
@@ -135,7 +167,7 @@ const getPaletteById = async (req, res) => {
       userId: req.user._id,
     })
       .populate("paletteId")
-      .populate("folderId", "name description");
+      .populate("folderId", "name description color"); // Fixed: added color field
 
     if (!userPalette) {
       return res.status(404).json({
@@ -144,6 +176,7 @@ const getPaletteById = async (req, res) => {
       });
     }
 
+    // Increment view count on global palette
     await Palette.findByIdAndUpdate(userPalette.paletteId._id, {
       $inc: { totalViews: 1 },
     });
@@ -151,14 +184,14 @@ const getPaletteById = async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        userPaletteId: userPalette._id,
+        savedPaletteId: userPalette._id, // Fixed: was userPaletteId
         globalPalette: userPalette.paletteId,
-        useruserata: {
+        userSaveData: { // Fixed: was useruserata
           folderId: userPalette.folderId,
           personalNotes: userPalette.personalNotes,
           personalTags: userPalette.personalTags,
           isLiked: userPalette.isLiked,
-          userAt: userPalette.userAt,
+          savedAt: userPalette.savedAt, // Fixed: was userAt
         },
       },
     });
@@ -183,17 +216,14 @@ const savePalette = async (req, res) => {
       personalTags,
     } = req.body;
 
-    // Check if user already saved this palette
-    const existingGlobalPalette = await Palette.findOne({
+    // First, find or create the global palette
+    let globalPalette = await Palette.findOne({
       source: "colormagic",
       externalId,
     });
 
-    let globalPalette;
-    if (existingGlobalPalette) {
-      globalPalette = existingGlobalPalette;
-
-      //check if palette with externalId already saved by user
+    if (globalPalette) {
+      // Check if user already saved this palette
       const existingPalette = await UserPalette.findOne({
         userId: req.user._id,
         paletteId: globalPalette._id,
@@ -204,7 +234,7 @@ const savePalette = async (req, res) => {
           success: false,
           message: "Palette already saved in your collection",
           data: {
-            savedPaletteId: existingSave._id,
+            savedPaletteId: existingPalette._id, // Fixed: was existingSave._id
             globalPalette,
           },
         });
@@ -218,7 +248,6 @@ const savePalette = async (req, res) => {
         tags,
         source: "colormagic",
         externalId,
-        createdBy: req.user._id,
         isPublic: true,
       });
     }
@@ -261,6 +290,76 @@ const savePalette = async (req, res) => {
     res.status(201).json({
       success: true,
       message: "Palette saved successfully",
+      data: {
+        savedPaletteId: populatedSavedPalette._id,
+        globalPalette: populatedSavedPalette.paletteId,
+        userSaveData: {
+          folderId: populatedSavedPalette.folderId,
+          personalNotes: populatedSavedPalette.personalNotes,
+          personalTags: populatedSavedPalette.personalTags,
+          isLiked: populatedSavedPalette.isLiked,
+          savedAt: populatedSavedPalette.savedAt,
+        },
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+const createCustomPalette = async (req, res) => {
+  try {
+    const { name, description, colors, tags, folderId } = req.body;
+
+    // Verify folder belongs to user if specified
+    if (folderId) {
+      const folder = await Folder.findOne({
+        _id: folderId,
+        userId: req.user._id,
+      });
+
+      if (!folder) {
+        return res.status(404).json({
+          success: false,
+          message: "Folder not found",
+        });
+      }
+    }
+
+    // Create global palette (user-created)
+    const globalPalette = await Palette.create({
+      name,
+      description,
+      colors,
+      tags,
+      source: "user",
+      isPublic: false, // User can decide later to make it public
+    });
+
+    // Automatically save it for the creating user
+    const savedPalette = await UserPalette.create({
+      userId: req.user._id,
+      paletteId: globalPalette._id,
+      folderId: folderId || null,
+    });
+
+    // Update folder palette count
+    if (folderId) {
+      await Folder.findByIdAndUpdate(folderId, {
+        $inc: { paletteCount: 1 },
+      });
+    }
+
+    const populatedSavedPalette = await UserPalette.findById(savedPalette._id)
+      .populate("paletteId")
+      .populate("folderId", "name color");
+
+    res.status(201).json({
+      success: true,
+      message: "Palette created and saved successfully",
       data: {
         savedPaletteId: populatedSavedPalette._id,
         globalPalette: populatedSavedPalette.paletteId,
@@ -398,7 +497,7 @@ const unsavePalette = async (req, res) => {
       });
     }
 
-    // Remove the saved palette (this will trigger the post-remove middleware to update global stats)
+    // Remove the saved palette
     await UserPalette.findByIdAndDelete(id);
 
     res.status(200).json({
@@ -413,7 +512,6 @@ const unsavePalette = async (req, res) => {
   }
 };
 
-// Get popular/trending palettes
 const getPopularPalettes = async (req, res) => {
   try {
     const { page = 1, limit = 20, timeframe = "all" } = req.query;
@@ -436,8 +534,7 @@ const getPopularPalettes = async (req, res) => {
     })
       .sort({ totalSaves: -1, totalLikes: -1 })
       .skip(skip)
-      .limit(parseInt(limit))
-      .populate("createdBy", "username firstName lastName");
+      .limit(parseInt(limit));
 
     const total = await Palette.countDocuments({
       isPublic: true,
@@ -480,15 +577,11 @@ const getPopularPalettes = async (req, res) => {
   }
 };
 
-// Get palette by global ID (for sharing/viewing)
 const getGlobalPaletteById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const palette = await Palette.findById(id).populate(
-      "createdBy",
-      "username firstName lastName"
-    );
+    const palette = await Palette.findById(id);
 
     if (!palette) {
       return res.status(404).json({
@@ -534,13 +627,88 @@ const getGlobalPaletteById = async (req, res) => {
   }
 };
 
+// Add endpoint to get palette by external ID (auto-syncs if needed)
+const getGlobalPaletteByExternalId = async (req, res) => {
+  try {
+    const { externalId } = req.params;
+
+    let palette = await Palette.findOne({
+      source: 'colormagic',
+      externalId
+    })
+
+    // If not found, try to sync from external API
+    if (!palette) {
+      try {
+        const externalData = await ColorMagicService.getPaletteById(externalId);
+
+        if (externalData.success) {
+          const transformedData = ColorMagicService.transformPalette(externalData.data);
+          palette = await Palette.create({
+            ...transformedData,
+            externalId,
+            source: 'colormagic',
+            isPublic: true
+          });
+        }
+      } catch (syncError) {
+        console.error('Failed to sync external palette:', syncError);
+      }
+    }
+
+    if (!palette) {
+      return res.status(404).json({
+        success: false,
+        message: 'Palette not found',
+      });
+    }
+
+    // Increment view count
+    await Palette.findByIdAndUpdate(palette._id, {
+      $inc: { totalViews: 1 }
+    });
+
+    // Check if user has saved this palette (if authenticated)
+    let isSaved = false;
+    let savedPaletteId = null;
+    if (req.user) {
+      const savedPalette = await UserPalette.findOne({
+        userId: req.user._id,
+        paletteId: palette._id
+      });
+      if (savedPalette) {
+        isSaved = true;
+        savedPaletteId = savedPalette._id;
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        palette: {
+          ...palette.toObject(),
+          isSaved,
+          savedPaletteId
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   searchPalettes,
   getUserPalettes,
   getPaletteById,
   savePalette,
+  createCustomPalette,
   updateSavedPalette,
   unsavePalette,
   getPopularPalettes,
   getGlobalPaletteById,
+  getGlobalPaletteByExternalId,
 };

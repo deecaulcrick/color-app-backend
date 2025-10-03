@@ -1,4 +1,5 @@
 const axios = require("axios");
+const ColorNamerService = require("./colorNamerService");
 
 class ColorMagicService {
   constructor() {
@@ -35,6 +36,8 @@ class ColorMagicService {
     }
   }
 
+
+
   // Transform ColorMagic palette to our format
   transformPalette(colorMagicPalette) {
     return {
@@ -42,7 +45,7 @@ class ColorMagicService {
       description: colorMagicPalette.description || '',
       colors: colorMagicPalette.colors?.map(color => ({
         hex: color.hex || color,
-        name: color || '',
+        name: ColorNamerService.getColorName(color.hex || color) || '',
         rgb: color.rgb || this.hexToRgb(color.hex || color),
         hsl: color.hsl || this.hexToHsl(color.hex || color)
       })) || [],
